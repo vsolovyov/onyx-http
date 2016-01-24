@@ -10,22 +10,23 @@
             [qbits.jet.client.http :as http]
             [taoensso.timbre :refer [debug info error] :as timbre]))
 
-(defn- process-message [client success? message ack-fn request-failed-fn]
+(defn- process-message [client success? message ack-fn]
   (go
     (try
       (let [rch      (http/post client (:url message) (:args message))
             response (<! rch)]
         (if (:error response)
-          (request-failed-fn {:request message :response response})
+          (error "Request failed" {:request message :response response})
           (let [body (<! (:body response))]
             (if (and (< (:status response) 400) (success? body))
               (ack-fn)
-              (request-failed-fn {:request message :response response :body body})))))
+              (error "Request isn't successful"
+                {:request message :response response :body body})))))
       (catch Exception e
-        (do (println e)
-            (request-failed-fn {:request message :exception e}))))))
+        (error "Exception" {:request message :exception e})))
+    (ack-fn)))
 
-(defrecord JetWriter [client success? request-failed-info]
+(defrecord JetWriter [client success?]
   p-ext/Pipeline
   (read-batch [_ event]
     (onyx.peer.function/read-batch event))
@@ -34,19 +35,15 @@
   (write-batch
     [_ {:keys [onyx.core/results onyx.core/peer-replica-view onyx.core/messenger]
         :as event}]
-    (when-not (empty? @request-failed-info)
-      (throw (ex-info "HTTP Request failed." @request-failed-info)))
     (doall
       (map (fn [[result ack]]
              (run! (fn [_] (inc-count! ack)) (:leaves result))
              (let [ack-fn (fn []
                             (when (dec-count! ack)
                               (when-let [site (peer-site peer-replica-view (:completion-id ack))]
-                                (extensions/internal-ack-segment messenger event site ack))))
-                   request-failed-fn (fn [data] (reset! request-failed-info data))]
+                                (extensions/internal-ack-segment messenger event site ack))))]
                (run! (fn [leaf]
-                       (process-message client success? (:message leaf)
-                         ack-fn request-failed-fn))
+                       (process-message client success? (:message leaf) ack-fn))
                  (:leaves result))))
         (map list (:tree results) (:acks results))))
     {:onyx.core/written? true})
@@ -63,6 +60,5 @@
 ;; Extending the function below is likely good for most use cases.
 (defn output [{:keys [onyx.core/task-map] :as pipeline-data}]
   (let [client (http/client)
-        success? (kw->fn (:http-output/success-fn task-map))
-        request-failed-info (atom {})]
-   (->JetWriter client success? request-failed-info)))
+        success? (kw->fn (:http-output/success-fn task-map))]
+   (->JetWriter client success?)))
