@@ -46,7 +46,7 @@
 (defn async-handler [request]
   (let [ch (chan)]
     (go
-      (>! out-chan "ZZ" #_(.read (:body request)))
+      (>! out-chan {:body (slurp (:body request))})
       (>! ch
         {:body "{\"success\": true}"
          :headers {"Content-Type" "json"}
@@ -97,12 +97,11 @@
           _ (info "Started Jetty server")
           _ (doseq [v messages]
               (>!! in-chan v))
-          _ (>!! in-chan :done)
           _ (close! in-chan)
           _ (info "Awaiting job completion")
           _ (onyx.api/await-job-completion peer-config (:job-id job))
           _ (info "Job completed")
-          _ (close! out-chan)
+          _ (>!! out-chan :done) ;; for take-segments!
           results (take-segments! out-chan)
           _ (info "Stopping Jetty server")
           _ (.stop server)
@@ -110,4 +109,4 @@
           _ (info "Stopped Jetty server")
           ]
       (is
-        (= results [{:body "a=1"} {:body "b=2"} {:body "c=3"}])))))
+        (= (set results) #{{:body "a=1"} {:body "b=2"} {:body "c=3"} :done})))))
