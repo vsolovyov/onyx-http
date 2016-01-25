@@ -40,8 +40,10 @@
    :onyx.messaging/bind-addr "localhost"
    :onyx/id id})
 
-(defn success? [response]
-  (:success response))
+(defn success? [{:keys [status body] :as response}]
+  (and
+    (< status 400)
+    (:success body)))
 
 (defn async-handler [request]
   (let [ch (chan)]

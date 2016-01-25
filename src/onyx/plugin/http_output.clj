@@ -10,23 +10,22 @@
             [qbits.jet.client.http :as http]
             [taoensso.timbre :refer [debug info error] :as timbre]))
 
-(defn- process-message [client success? message ack-fn]
+(defn- process-message [client success? message ack-fn async-exception-fn]
   (go
     (try
       (let [rch      (http/post client (:url message) (:args message))
             response (<! rch)]
         (if (:error response)
           (error "Request failed" {:request message :response response})
-          (let [body (<! (:body response))]
-            (if (and (< (:status response) 400) (success? body))
+          (let [body (<! (:body response))
+                fetched (assoc response :body body)]
+            (if (success? fetched)
               (ack-fn)
-              (error "Request isn't successful"
-                {:request message :response response :body body})))))
+              (error "Request" {:request message :response fetched})))))
       (catch Exception e
-        (error "Exception" {:request message :exception e})))
-    (ack-fn)))
+        (async-exception-fn {:request message :exception e})))))
 
-(defrecord JetWriter [client success?]
+(defrecord JetWriter [client success? async-exception-info]
   p-ext/Pipeline
   (read-batch [_ event]
     (onyx.peer.function/read-batch event))
@@ -35,15 +34,19 @@
   (write-batch
     [_ {:keys [onyx.core/results onyx.core/peer-replica-view onyx.core/messenger]
         :as event}]
+    (when-not (empty? @async-exception-info)
+      (throw (ex-info "HTTP Request failed." @async-exception-info)))
     (doall
       (map (fn [[result ack]]
              (run! (fn [_] (inc-count! ack)) (:leaves result))
              (let [ack-fn (fn []
                             (when (dec-count! ack)
                               (when-let [site (peer-site peer-replica-view (:completion-id ack))]
-                                (extensions/internal-ack-segment messenger event site ack))))]
+                                (extensions/internal-ack-segment messenger event site ack))))
+                   async-exception-fn (fn [data] (reset! async-exception-info data))]
                (run! (fn [leaf]
-                       (process-message client success? (:message leaf) ack-fn))
+                       (process-message client success? (:message leaf)
+                         ack-fn async-exception-fn))
                  (:leaves result))))
         (map list (:tree results) (:acks results))))
     {:onyx.core/written? true})
@@ -52,13 +55,11 @@
     (.destroy client)
     {}))
 
+(defn success?-default [{:keys [status]}]
+  (< status 500))
 
-;; Builder function for your output plugin.
-;; Instantiates a record.
-;; It is highly recommended you inject and pre-calculate frequently used data
-;; from your task-map here, in order to improve the performance of your plugin
-;; Extending the function below is likely good for most use cases.
 (defn output [{:keys [onyx.core/task-map] :as pipeline-data}]
   (let [client (http/client)
-        success? (kw->fn (:http-output/success-fn task-map))]
-   (->JetWriter client success?)))
+        success? (kw->fn (or (:http-output/success-fn task-map) ::success?-default))
+        async-exception-info (atom {})]
+   (->JetWriter client success? async-exception-info)))
