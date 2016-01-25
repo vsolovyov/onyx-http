@@ -43,7 +43,7 @@ Lifecycle entry:
 
 |key                           | type      | description
 |------------------------------|-----------|------------
-|`:http-output/success-fn`     | `keyword` | Accepts body as argument, says if correct.
+|`:http-output/success-fn`     | `keyword` | Accepts response as argument, should return boolean to indicate if the response was successful. Request will be retried in case it wasn't a success.
 
 #### Contributing
 
